@@ -1,0 +1,110 @@
+#!/bin/sh
+# /etc/init.d/S04usb — Dual-Mode USB Manager (Kernel Hot-plug & OTG Cold-Boot Safe)
+# Hardware: HP Prime G1 (S3C2416, G8X92AA Rev C)
+# Logic:
+#  1. Kernel hpprime-otg in-tree driver handles 5V VBUS, PHY & IRQ hot-plug.
+#  2. CRITICAL: Never bind s3c-hsudc (echo "s3c-hsudc" > UDC) while OTG Host
+#     mode (ID=0, GPF6=0, 5V VBUS ON) is active! Calling s3c_hsudc_start() on
+#     an active 5V Host bus resets the shared USB PHY (s3c_hsudc_init_phy) and
+#     clears UCLKCON_FUNC_CLKEN inside smdk2416_hsudc_gpio_init, freezing boot
+#     at "<smdk2416_hsudc_gpio_init>".
+#  3. RNDIS Gadget (g1 -> s3c-hsudc) is bound ONLY when in Device mode (ID=1).
+
+LOG=/var/log/usb-mode.log
+LOCKDIR=/tmp/s04usb.lock
+
+acquire_lock() {
+    local i=0
+    while ! mkdir "$LOCKDIR" 2>/dev/null; do
+        i=$((i + 1))
+        [ $i -ge 50 ] && break
+        usleep 100000 2>/dev/null || sleep 1
+    done
+    trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT INT TERM
+}
+
+# Read physical GPF6 (Pin 4 OTG ID) via GPFDAT (0x56000054) Bit 6 (0x40).
+# Returns 0 (true) if OTG cable is inserted (ID == 0, Host Mode),
+# Returns 1 (false) if OTG cable is disconnected (ID == 1, Device Mode).
+is_otg_host_mode() {
+    local gpfdat
+    gpfdat=$(devmem 0x56000054 2>/dev/null || echo "0x40")
+    [ $((gpfdat & 0x40)) -eq 0 ]
+}
+
+ensure_rndis_gadget() {
+    # Safety guard: NEVER bind UDC while OTG Host mode (ID=0) is physically active
+    if is_otg_host_mode; then
+        echo "[$(date +%T)] Skip UDC bind: OTG Host cable (ID=0) is active" >> "$LOG"
+        return 0
+    fi
+
+    mount -t configfs none /sys/kernel/config 2>/dev/null || true
+    mkdir -p /sys/kernel/config/usb_gadget/g1
+    cd /sys/kernel/config/usb_gadget/g1 || return 1
+
+    echo "0x04D8" > idVendor 2>/dev/null || true
+    echo "0x1234" > idProduct 2>/dev/null || true
+    mkdir -p strings/0x409
+    echo "0123456789" > strings/0x409/serialnumber 2>/dev/null || true
+    echo "Microchip Technology, Inc." > strings/0x409/manufacturer 2>/dev/null || true
+    echo "Linux USB Gadget" > strings/0x409/product 2>/dev/null || true
+    mkdir -p functions/rndis.usb0
+    mkdir -p configs/c.1
+    mkdir -p configs/c.1/strings/0x409
+    echo "HP PRIME V2 RNDIS" > configs/c.1/strings/0x409/configuration 2>/dev/null || true
+    [ -L configs/c.1/rndis.usb0 ] || ln -s functions/rndis.usb0 configs/c.1/ 2>/dev/null || true
+
+    # Bind once in Device Mode; never unbind (unbinding calls s3c_hsudc_stop which powers off PHY)
+    CUR_UDC=$(cat UDC 2>/dev/null || true)
+    if [ -z "$CUR_UDC" ]; then
+        echo "s3c-hsudc" > UDC 2>/dev/null || true
+        echo "[$(date +%T)] RNDIS Gadget bound to s3c-hsudc" >> "$LOG"
+    fi
+
+    # Always ensure usb0 has 192.168.66.1/24 and is IFF_UP (required by u_ether gether_connect)
+    /sbin/ifconfig usb0 192.168.66.1 netmask 255.255.255.0 up 2>/dev/null || true
+}
+
+start_host_mode() {
+    echo "[$(date +%T)] USB Host Mode active (OTG ID=0, Kernel In-Tree)" >> "$LOG"
+    # Do NOT call ensure_rndis_gadget here! Shared PHY must remain dedicated to OHCI.
+    if [ ! -d /sys/bus/platform/drivers/s3c2410-ohci/s3c2410-ohci ]; then
+        echo s3c2410-ohci > /sys/bus/platform/drivers/s3c2410-ohci/bind 2>/dev/null || true
+    fi
+    echo enabled > /sys/bus/usb/devices/usb1/power/wakeup 2>/dev/null || true
+    echo on > /sys/bus/usb/devices/usb1/power/control 2>/dev/null || true
+}
+
+start_device_mode() {
+    echo "[$(date +%T)] USB Device Mode active (OTG ID=1, PC RNDIS 192.168.66.1)" >> "$LOG"
+    ensure_rndis_gadget
+}
+
+case "$1" in
+    start)
+        acquire_lock
+        if is_otg_host_mode; then
+            start_host_mode
+        else
+            start_device_mode
+        fi
+        ;;
+    host)
+        acquire_lock
+        start_host_mode
+        ;;
+    device)
+        acquire_lock
+        start_device_mode
+        ;;
+    stop)
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|host|device}"
+        exit 1
+        ;;
+esac
+
+exit 0
+

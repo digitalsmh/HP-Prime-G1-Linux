@@ -1,0 +1,18 @@
+HP Prime G1 Linux Port
+
+Unofficial community project, not affiliated with or endorsed by HP Inc.
+Use at your own risk: flashing firmware may permanently damage (brick)
+your device. No warranty.
+
+Own code (scripts/, rootfs-overlay/ scripts, src/20_HPPrime-Tool,
+src/Linux-For-HPPrime-V3/tools, docs/): GPL-2.0-or-later, see LICENSE.
+
+Third-party components (each keeps its own license)
+  kernel/arch, ...    Linux kernel files/patches, GPL-2.0
+  src/htop            Build script only; htop sources (GPL, upstream: https://github.com/htop-dev/htop) and binaries are not included
+  src/loderunner-ng   Lode Runner NG, (c) 2024-2025 Viacheslav Chimishuk,
+                      GPL-3.0-or-later, see src/loderunner-ng/COPYING
+                      https://github.com/vchimishuk/loderunner-ng
+                      Game assets (levels, sprites, sounds) are NOT included.
+  Korean fonts        Galmuri (GalmuriMono9/11), (c) 2019-2025 Lee Minseo,
+                      SIL OFL 1.1, https://github.com/quiple/galmuri

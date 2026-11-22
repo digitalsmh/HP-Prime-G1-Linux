@@ -1,0 +1,334 @@
+diff -ruN a/arch/arm/boot/compressed/misc.c b/arch/arm/boot/compressed/misc.c
+--- a/arch/arm/boot/compressed/misc.c	2026-11-18 15:56:37.324778036 +0900
++++ b/arch/arm/boot/compressed/misc.c	2026-11-18 15:56:37.326934059 +0900
+@@ -134,6 +134,22 @@
+ extern int do_decompress(u8 *input, int len, u8 *output, void (*error)(char *x));
+ 
+ 
++/*
++ * 40_Build screen diagnostics (2026-11-18): no UART is wired, so paint a 24 px stripe in the
++ * TOP band of the BOOT1 framebuffer (phys 0x31F80000, 320x240 x8r8g8b8). The decompressor runs
++ * with a 1:1 mapping, so the physical address is usable here.
++ *   top slot 1 green = decompression OK, red = decompressor error
++ */
++static void hpp_diag_top(unsigned int slot, unsigned int rgb)
++{
++	volatile unsigned int *fb = (volatile unsigned int *)0x31F80000;
++	unsigned int x, y, x0 = (slot - 1) * 53;
++
++	for (y = 0; y < 24; y++)
++		for (x = x0; x < x0 + 49 && x < 320; x++)
++			fb[x + y * 320] = rgb;
++}
++
+ void
+ decompress_kernel(unsigned long output_start, unsigned long free_mem_ptr_p,
+ 		unsigned long free_mem_ptr_end_p,
+@@ -154,10 +170,13 @@
+ 	putstr("Uncompressing Linux...");
+ 	ret = do_decompress(input_data, input_data_end - input_data,
+ 			    output_data, error);
+-	if (ret)
++	if (ret) {
++		hpp_diag_top(1, 0x00FF0000);
+ 		error("decompressor returned an error");
+-	else
++	} else {
++		hpp_diag_top(1, 0x0000FF00);
+ 		putstr(" done, booting the kernel.\n");
++	}
+ }
+ 
+ void fortify_panic(const char *name)
+diff -ruN a/arch/arm/kernel/head.S b/arch/arm/kernel/head.S
+--- a/arch/arm/kernel/head.S	2026-11-18 15:56:37.337024382 +0900
++++ b/arch/arm/kernel/head.S	2026-11-18 15:56:37.338925202 +0900
+@@ -104,6 +104,22 @@
+ 	@ ensure svc mode and all interrupts masked
+ 	safe_svcmode_maskall r9
+ 
++#ifdef CONFIG_MACH_HPPRIMEV2
++	@ 40_Build diag: MMU off here; paint row 1 slot 1 white at phys FB 0x31F80000 (y 30..53, x 0..48)
++	ldr	r0, =(0x31F80000 + 30 * 320 * 4)
++	mvn	r6, #0xFF000000
++	mov	r3, #24
++1:	mov	r5, #49
++2:	str	r6, [r0], #4
++	subs	r5, r5, #1
++	bne	2b
++	add	r0, r0, #1024
++	add	r0, r0, #60
++	subs	r3, r3, #1
++	bne	1b
++	mov	r0, #0
++#endif
++
+ 	mrc	p15, 0, r9, c0, c0		@ get processor id
+ 	bl	__lookup_processor_type		@ r5=procinfo r9=cpuid
+ 	movs	r10, r5				@ invalid processor (r5=0)?
+@@ -304,6 +320,15 @@
+ 	addne	r6, r6, #1 << SECTION_SHIFT
+ 	strne	r6, [r3]
+ 
++#ifdef CONFIG_MACH_HPPRIMEV2
++	/* 40_Build diag: section VA 0xF9000000 -> PA 0x31F00000 (FB at +0x80000), device/uncached */
++	ldr	r6, [r10, #PROCINFO_IO_MMUFLAGS]
++	ldr	r3, =0x31F00000
++	orr	r3, r3, r6
++	add	r0, r4, #(0xF9000000 >> (SECTION_SHIFT - PMD_ENTRY_ORDER))
++	str	r3, [r0]
++#endif
++
+ #if defined(CONFIG_ARM_LPAE) && defined(CONFIG_CPU_ENDIAN_BE8)
+ 	sub	r4, r4, #4			@ Fixup page table pointer
+ 						@ for 64-bit descriptors
+diff -ruN a/arch/arm/kernel/setup.c b/arch/arm/kernel/setup.c
+--- a/arch/arm/kernel/setup.c	2026-11-18 15:56:37.349460988 +0900
++++ b/arch/arm/kernel/setup.c	2026-11-18 15:56:37.351105770 +0900
+@@ -1092,6 +1092,7 @@
+ 	.priority = 128,
+ };
+ 
++#include <linux/hpp_diag.h>
+ void __init setup_arch(char **cmdline_p)
+ {
+ 	const struct machine_desc *mdesc = NULL;
+@@ -1118,6 +1119,7 @@
+ 		dump_machine_table();
+ 	}
+ 
++	hpp_diag(1, 3, 0x0000FFFF);	/* 40_Build: machine desc found */
+ 	machine_desc = mdesc;
+ 	machine_name = mdesc->name;
+ 	dump_stack_set_arch_desc("%s", mdesc->name);
+@@ -1135,10 +1137,12 @@
+ 	early_ioremap_init();
+ 
+ 	parse_early_param();
++	hpp_diag(3, 1, 0x00FFFFFF);	/* 40_Build: parse_early_param */
+ 
+ #ifdef CONFIG_MMU
+ 	early_mm_init(mdesc);
+ #endif
++	hpp_diag(3, 2, 0x0000FF00);	/* 40_Build: early_mm_init */
+ 	setup_dma_zone(mdesc);
+ 	xen_early_init();
+ 	arm_efi_init();
+@@ -1148,12 +1152,14 @@
+ 	 */
+ 	adjust_lowmem_bounds();
+ 	arm_memblock_init(mdesc);
++	hpp_diag(3, 3, 0x0000FFFF);	/* 40_Build: arm_memblock_init */
+ 	/* Memory may have been removed so recalculate the bounds. */
+ 	adjust_lowmem_bounds();
+ 
+ 	early_ioremap_reset();
+ 
+ 	paging_init(mdesc);
++	hpp_diag(1, 4, 0x000000FF);	/* 40_Build: paging_init done */
+ 	kasan_init();
+ 	request_standard_resources(mdesc);
+ 
+diff -ruN a/arch/arm/mach-s3c/mach-hpprime.c b/arch/arm/mach-s3c/mach-hpprime.c
+--- a/arch/arm/mach-s3c/mach-hpprime.c	2026-11-18 15:56:37.360592050 +0900
++++ b/arch/arm/mach-s3c/mach-hpprime.c	2026-11-18 15:56:37.362220024 +0900
+@@ -60,6 +60,7 @@
+ #include <linux/input/matrix_keypad.h>
+ #include <linux/gpio.h>
+ #include <linux/gpio_keys.h>
++#include <linux/hpp_diag.h>
+ 
+ static struct map_desc smdk2416_iodesc[] __initdata = {
+ 	/* ISA IO Space map (memory space selected by A24) */
+@@ -76,6 +77,12 @@
+ 		.length		= SZ_4M,
+ 		.type		= MT_DEVICE,
+ 	}, 
++	{	/* 40_Build diag: BOOT1 framebuffer at fixed VA (include/linux/hpp_diag.h) */
++		.virtual	= 0xF9080000,
++		.pfn		= __phys_to_pfn(0x31F80000),
++		.length		= SZ_512K,
++		.type		= MT_DEVICE,
++	},
+ };
+ 
+ #define UCON (S3C2410_UCON_DEFAULT	| \
+@@ -360,6 +367,7 @@
+ static void __init smdk2416_map_io(void)
+ {
+ 	s3c24xx_init_io(smdk2416_iodesc, ARRAY_SIZE(smdk2416_iodesc));
++	hpp_diag(3, 6, 0x00FF00FF);	/* 40_Build: iotable + CPU id OK */
+ 	s3c24xx_init_uarts(smdk2416_uartcfgs, ARRAY_SIZE(smdk2416_uartcfgs));
+ 	s3c24xx_set_timer_source(S3C24XX_PWM3, S3C24XX_PWM4);
+ }
+@@ -380,8 +388,36 @@
+ 	//smdk2416_hsudc_gpio_uninit();
+ }
+ 
++/*
++ * 40_Build screen diagnostics (2026-11-18): no UART wired. Paint 24 px stripes in the TOP band of
++ * the BOOT1 framebuffer (phys 0x31F80000, 320x240 x8r8g8b8, excluded from RAM by ATAG_MEM).
++ *   top slot 2 cyan   = init_machine reached (early kernel boot, MMU/IRQ/timer OK)
++ *   top slot 3 yellow = late_initcall reached (driver registration done)
++ */
++static void hpp_diag_top(unsigned int slot, unsigned int rgb)
++{
++	u32 __iomem *fb = ioremap(0x31F80000, 320 * 240 * 4);
++	unsigned int x, y, x0 = (slot - 1) * 53;
++
++	if (!fb)
++		return;
++	for (y = 0; y < 24; y++)
++		for (x = x0; x < x0 + 49 && x < 320; x++)
++			writel(rgb, fb + x + y * 320);
++	iounmap(fb);
++}
++
++static int __init hpp_diag_late(void)
++{
++	if (machine_is_hpprime())
++		hpp_diag_top(3, 0x00FFFF00);
++	return 0;
++}
++late_initcall(hpp_diag_late);
++
+ static void __init smdk2416_machine_init(void)
+ {
++	hpp_diag_top(2, 0x0000FFFF);
+ 	s3c_i2c0_set_platdata(NULL);
+ 	s3c_fb_set_platdata(&smdk2416_fb_platdata);
+ 	
+diff -ruN a/arch/arm/mm/mmu.c b/arch/arm/mm/mmu.c
+--- a/arch/arm/mm/mmu.c	2026-11-18 15:56:37.371317048 +0900
++++ b/arch/arm/mm/mmu.c	2026-11-18 15:56:37.373108350 +0900
+@@ -1758,6 +1758,7 @@
+  * paging_init() sets up the page tables, initialises the zone memory
+  * maps, and sets up the zero page, bad page and bad page tables.
+  */
++#include <linux/hpp_diag.h>
+ void __init paging_init(const struct machine_desc *mdesc)
+ {
+ 	void *zero_page;
+@@ -1767,6 +1768,7 @@
+ 
+ 	prepare_page_table();
+ 	map_lowmem();
++	hpp_diag(3, 4, 0x000000FF);	/* 40_Build: map_lowmem */
+ 	memblock_set_current_limit(arm_lowmem_limit);
+ 	pr_debug("lowmem limit is %08llx\n", (long long)arm_lowmem_limit);
+ 	/*
+@@ -1776,7 +1778,9 @@
+ 	map_kernel();
+ 	dma_contiguous_remap();
+ 	early_fixmap_shutdown();
++	hpp_diag(3, 5, 0x00FFFF00);	/* 40_Build: map_kernel+fixmap shutdown */
+ 	devicemaps_init(mdesc);
++	hpp_diag(4, 1, 0x00FFFFFF);	/* 40_Build: devicemaps_init done */
+ 	kmap_init();
+ 	tcm_init();
+ 
+@@ -1785,7 +1789,9 @@
+ 	/* allocate the zero page. */
+ 	zero_page = early_alloc(PAGE_SIZE);
+ 
++	hpp_diag(4, 2, 0x0000FF00);	/* 40_Build: zero page alloc */
+ 	bootmem_init();
++	hpp_diag(4, 3, 0x0000FFFF);	/* 40_Build: bootmem_init */
+ 
+ 	empty_zero_page = virt_to_page(zero_page);
+ 	__flush_dcache_page(NULL, empty_zero_page);
+diff -ruN a/include/linux/hpp_diag.h b/include/linux/hpp_diag.h
+--- a/include/linux/hpp_diag.h	1970-01-01 09:00:00.000000000 +0900
++++ b/include/linux/hpp_diag.h	2026-11-18 15:56:37.394470728 +0900
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * 40_Build screen diagnostics (2026-11-18). No UART is wired on the HP Prime, so boot progress is
++ * painted into the BOOT1 framebuffer (phys 0x31F80000, 320x240 x8r8g8b8).
++ * Fixed VA 0xF9080000 -> PA 0x31F80000: mapped by head.S (1 MiB section, until paging_init) and by
++ * smdk2416_iodesc (after paging_init). Usable from start_kernel on, except inside paging_init.
++ * row 0 = top band (decompressor / machine), row 1 = second band, row 2 = third band.
++ */
++#ifndef _LINUX_HPP_DIAG_H
++#define _LINUX_HPP_DIAG_H
++
++#define HPP_DIAG_VA	0xF9080000UL
++#define HPP_DIAG_PA	0x31F80000UL
++
++static inline void hpp_diag(unsigned int row, unsigned int slot, unsigned int rgb)
++{
++	volatile unsigned int *fb = (volatile unsigned int *)HPP_DIAG_VA;
++	unsigned int x, y, x0 = (slot - 1) * 53, y0 = row * 30;
++
++	for (y = y0; y < y0 + 24; y++)
++		for (x = x0; x < x0 + 49 && x < 320; x++)
++			fb[x + y * 320] = rgb;
++}
++#endif
+diff -ruN a/init/main.c b/init/main.c
+--- a/init/main.c	2026-11-18 15:56:37.383009410 +0900
++++ b/init/main.c	2026-11-18 15:56:37.384784479 +0900
+@@ -933,11 +933,15 @@
+ 	memblock_free(unknown_options, len);
+ }
+ 
++
++#include <linux/hpp_diag.h>
++
+ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
+ {
+ 	char *command_line;
+ 	char *after_dashes;
+ 
++	hpp_diag(1, 2, 0x0000FF00);	/* 40_Build: start_kernel entry */
+ 	set_task_stack_end_magic(&init_task);
+ 	smp_setup_processor_id();
+ 	debug_objects_early_init();
+@@ -957,6 +961,7 @@
+ 	pr_notice("%s", linux_banner);
+ 	early_security_init();
+ 	setup_arch(&command_line);
++	hpp_diag(1, 5, 0x00FFFF00);	/* 40_Build: setup_arch returned */
+ 	setup_boot_config();
+ 	setup_command_line(command_line);
+ 	setup_nr_cpu_ids();
+@@ -995,6 +1000,7 @@
+ 	sort_main_extable();
+ 	trap_init();
+ 	mm_init();
++	hpp_diag(1, 6, 0x00FF00FF);	/* 40_Build: mm_init done */
+ 
+ 	ftrace_init();
+ 
+@@ -1039,6 +1045,7 @@
+ 	/* init some links before init_ISA_irqs() */
+ 	early_irq_init();
+ 	init_IRQ();
++	hpp_diag(2, 1, 0x00FFFFFF);	/* init_IRQ done */
+ 	tick_init();
+ 	rcu_init_nohz();
+ 	init_timers();
+@@ -1047,6 +1054,7 @@
+ 	softirq_init();
+ 	timekeeping_init();
+ 	time_init();
++	hpp_diag(2, 2, 0x0000FF00);	/* time_init done */
+ 
+ 	/* This must be after timekeeping is initialized */
+ 	random_init();
+@@ -1071,6 +1079,7 @@
+ 	 * this. But we do want output early, in case something goes wrong.
+ 	 */
+ 	console_init();
++	hpp_diag(2, 3, 0x0000FFFF);	/* console_init done */
+ 	if (panic_later)
+ 		panic("Too many boot %s vars at `%s'", panic_later,
+ 		      panic_param);
+@@ -1142,6 +1151,7 @@
+ 	kcsan_init();
+ 
+ 	/* Do the rest non-__init'ed, we're now alive */
++	hpp_diag(2, 4, 0x000000FF);	/* rest_init */
+ 	arch_call_rest_init();
+ 
+ 	prevent_tail_call_optimization();

@@ -1,0 +1,19 @@
+#!/bin/sh
+
+case "$1" in
+  start)
+        [ -f /etc/X11/hpp-keymap.xkb ] && DISPLAY=:0 xkbcomp /etc/X11/hpp-keymap.xkb :0 2>/dev/null || true
+        cd /root && HOME=/root DISPLAY=:0 xterm -u8 -wc -cjk_width -fn kr-half -fw kr-full -ls -geometry 52x14+0+0 &
+        ;;
+  stop)
+        killall hpp-vkbd xterm 2>/dev/null || true
+        ;;
+  restart|reload)
+        "$0" stop
+        "$0" start
+        ;;
+  *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+esac
+

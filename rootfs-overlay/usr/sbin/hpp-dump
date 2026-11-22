@@ -1,0 +1,50 @@
+#!/bin/sh
+# /usr/sbin/hpp-dump — 40_Build dump mode (2026-11-17). Read-only NAND dump for HP Prime G1.
+# Run as root on the calculator (via SSH over RNDIS). Writes only to RAM (/tmp, tmpfs). Never writes NAND.
+#
+# Output in /tmp/hpp-dump/:
+#   nand-full-oob.bin   whole NAND, main+OOB interleaved per page (nanddump --oob --noecc --bb=dumpbad)
+#   mtdN-*.bin          per-partition main-area dumps (boot0 + headers) for cross-check
+#   mtdinfo.txt, dmesg-mtd.txt, SHA256SUMS
+# Whole NAND with OOB is ~264 MiB; the calculator has ~31.5 MiB RAM, so the full dump is streamed
+# to the PC instead:   ssh root@192.168.66.1 hpp-dump stream > nand-full-oob.bin
+set -eu
+
+find_mtd() {  # $1 = partition name -> /dev/mtdN (names may contain spaces, e.g. "HP Boot Code")
+    awk -F'"' -v n="$1" '$2==n {split($1,a,":"); print "/dev/" a[1]; exit}' /proc/mtd
+}
+
+master() {  # whole-NAND master device (size 0x10000000), read-only by kernel patch
+    awk '$2=="10000000" {sub(":","",$1); print "/dev/" $1; exit}' /proc/mtd
+}
+
+case "${1:-small}" in
+  small)
+    out=/tmp/hpp-dump; mkdir -p "$out"; cd "$out"
+    cat /proc/mtd > mtdinfo.txt
+    mtdinfo -a >> mtdinfo.txt 2>&1 || true
+    dmesg | grep -iE 'mtd|nand|bad' > dmesg-mtd.txt || true
+    b0="$(find_mtd 'HP Boot Code')"
+    [ -n "$b0" ] || { echo "ERROR: HP Boot Code partition not found" >&2; exit 2; }
+    nanddump --oob --noecc --bb=dumpbad -f boot0-oob.bin "$b0"
+    nanddump --noecc --bb=dumpbad --omitoob -f boot0-main.bin "$b0"
+    m="$(master)"
+    [ -n "$m" ] && nanddump --oob --noecc --bb=dumpbad -l 0x200000 -f nand-first2m-oob.bin "$m"
+    sha256sum *.bin > SHA256SUMS
+    cat SHA256SUMS
+    echo "OK: small dump in $out (no NAND write performed)"
+    ;;
+  stream)
+    m="$(master)"
+    [ -n "$m" ] || { echo "ERROR: whole-NAND master mtd not found" >&2; exit 2; }
+    exec nanddump --oob --noecc --bb=dumpbad -q "$m"
+    ;;
+  stream-main)
+    m="$(master)"
+    [ -n "$m" ] || { echo "ERROR: whole-NAND master mtd not found" >&2; exit 2; }
+    exec nanddump --omitoob --noecc --bb=dumpbad -q "$m"
+    ;;
+  *)
+    echo "Usage: hpp-dump {small|stream|stream-main}" >&2; exit 1
+    ;;
+esac

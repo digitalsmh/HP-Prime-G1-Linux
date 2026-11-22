@@ -1,0 +1,13 @@
+#!/bin/sh
+# /usr/bin/hpp-doom [stop] — start PrBoom (Doom shareware) on the calculator screen (40_Build, 2026-11-19).
+# Needs swap (S03swapon): without it Xorg is OOM-killed when a game starts. Config and log live in /tmp (RAM).
+if [ "$1" = stop ]; then killall prboom 2>/dev/null && echo stopped || echo "not running"; exit 0; fi
+grep -q "^/dev/loop0 " /proc/swaps || { echo "hpp-doom: swap is off (run /etc/init.d/S03swapon start)"; exit 2; }
+pidof prboom >/dev/null && { echo "hpp-doom: already running"; exit 0; }
+pidof Xorg >/dev/null || { rm -f /var/run/xorg.pid; /etc/init.d/S40xorg start; sleep 5; }
+mkdir -p /tmp/.prboom
+[ -f /tmp/.prboom/prboom.cfg ] || cp /etc/prboom/hpp-keys.cfg /tmp/.prboom/prboom.cfg
+cd /tmp
+DISPLAY=:0 HOME=/tmp nohup /usr/games/prboom -iwad /usr/share/games/doom/doom1.wad \
+    -nosound -nomusic -width 320 -height 240 -nofullscreen > /tmp/prboom.log 2>&1 &
+echo "hpp-doom: started (log /tmp/prboom.log; keys: arrows move, f fire, a/d strafe, space use, shift run)"

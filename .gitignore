@@ -1,0 +1,39 @@
+# Ignore large firmware images, full NAND dumps, and build trees (>100MB)
+*.bin
+*.dat
+*.DAT
+*.ROM
+*.rom
+*.jffs2
+*.wad
+*.WAD
+*.zip
+*.tar.gz
+*.tar.xz
+zImage
+uImage
+
+# Ignore temporary files and editor backups
+*.o
+*.ko
+*.bak
+*.orig
+*.swp
+*~
+.DS_Store
+
+# Ignore private SSH keys
+id_rsa
+id_ed25519
+*.pem
+*.key
+
+src/htop/out/
+src/loderunner-ng/*.o
+src/loderunner-ng/loderunner-ng
+src/loderunner-ng/*.o
+src/loderunner-ng/loderunner-ng
+src/loderunner-ng/share/
+src/loderunner-ng/doc/
+kernel/bootloader/
+src/Linux-For-HPPrime-V3/bootloader/

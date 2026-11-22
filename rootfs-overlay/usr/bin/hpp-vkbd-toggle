@@ -1,0 +1,7 @@
+#!/bin/sh
+# /usr/bin/hpp-vkbd-toggle — Toggle HP Prime G1 X11 Touchscreen Virtual Keyboard
+if pidof hpp-vkbd >/dev/null 2>&1; then
+    kill -TERM $(pidof hpp-vkbd) 2>/dev/null || true
+else
+    DISPLAY=:0 /usr/bin/hpp-vkbd >/dev/null 2>&1 &
+fi

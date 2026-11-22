@@ -1,0 +1,48 @@
+diff -ruN a/arch/arm/mach-s3c/mach-hpprime.c b/arch/arm/mach-s3c/mach-hpprime.c
+--- a/arch/arm/mach-s3c/mach-hpprime.c	2026-11-18 15:56:37.279555020 +0900
++++ b/arch/arm/mach-s3c/mach-hpprime.c	2026-11-18 15:56:37.297554066 +0900
+@@ -188,6 +188,8 @@
+ 		.name	= "HP Boot Code",
+ 		.offset	= 0,
+ 		.size	= SZ_256K,
++		/* 40_Build: Boot0 is read-only from Linux (nanddump only). */
++		.mask_flags = MTD_WRITEABLE,
+ 	},
+ 	[1] = {
+ 		.name	= "Linux Bootloader",
+diff -ruN a/drivers/mtd/mtdcore.c b/drivers/mtd/mtdcore.c
+--- a/drivers/mtd/mtdcore.c	2026-11-18 15:56:37.269843063 +0900
++++ b/drivers/mtd/mtdcore.c	2026-11-18 15:56:37.282763746 +0900
+@@ -1047,6 +1047,18 @@
+ 		goto out;
+ 
+ 	/*
++	 * 40_Build (2026-11-17): with CONFIG_MTD_PARTITIONED_MASTER the whole-NAND
++	 * master is exposed for a full raw dump. Make it read-only. Partitions were
++	 * already created above with their own flags (child->flags is a copy), and
++	 * every write/erase path checks the target mtd's own flags, so this only
++	 * affects the master device.
++	 */
++	if (IS_ENABLED(CONFIG_MTD_PARTITIONED_MASTER) && device_is_registered(&mtd->dev)) {
++		mtd->flags &= ~MTD_WRITEABLE;
++		pr_info("mtd: master \"%s\" exposed read-only for dump\n", mtd->name);
++	}
++
++	/*
+ 	 * FIXME: some drivers unfortunately call this function more than once.
+ 	 * So we have to check if we've already assigned the reboot notifier.
+ 	 *
+diff -ruN a/drivers/of/fdt.c b/drivers/of/fdt.c
+--- a/drivers/of/fdt.c	2026-11-18 15:56:37.259670599 +0900
++++ b/drivers/of/fdt.c	2026-11-18 15:56:37.302181698 +0900
+@@ -1015,6 +1015,10 @@
+ 	const void *fdt = initial_boot_params;
+ 	int ret;
+ 
++	/* 40_Build (2026-11-18): ATAG boot (no DTB) + bare "earlycon" -> fdt is NULL; reading it hangs. */
++	if (!fdt)
++		return -ENOENT;
++
+ 	offset = fdt_path_offset(fdt, "/chosen");
+ 	if (offset < 0)
+ 		offset = fdt_path_offset(fdt, "/chosen@0");

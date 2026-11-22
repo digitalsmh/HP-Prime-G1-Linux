@@ -1,0 +1,66 @@
+#!/bin/sh
+# /usr/bin/hpp-loderunner (aliased as /usr/bin/ld) [stop | args...]
+# Safely launches loderunner-ng after memory/zram optimization.
+if [ "$1" = "stop" ]; then
+    killall -9 loderunner-ng 2>/dev/null && echo "ld: stopped" || echo "ld: not running"
+    pidof xterm >/dev/null 2>&1 || DISPLAY=:0 xterm -geometry 53x17+0+0 </dev/null >/dev/null 2>&1 &
+    exit 0
+fi
+
+# Restart cleanly if already running
+if pidof loderunner-ng >/dev/null 2>&1; then
+    echo "ld: restarting running loderunner-ng..."
+    killall -9 loderunner-ng 2>/dev/null || true
+    sleep 1
+fi
+
+# 1. Disable NAND loop0 swap if present and ensure zram0 swap is active
+if grep -q "/dev/loop0" /proc/swaps 2>/dev/null; then
+    swapoff /dev/loop0 2>/dev/null || true
+    losetup -d /dev/loop0 2>/dev/null || true
+fi
+if grep -q "/dev/loop0" /proc/swaps 2>/dev/null; then
+    echo "실행 불가: NAND 스왑(/dev/loop0)을 해제할 수 없어 커널 정지(livelock) 위험이 있습니다." >&2
+    exit 1
+fi
+
+if ! grep -q "^/dev/zram0 " /proc/swaps 2>/dev/null; then
+    /etc/init.d/S03swapon start
+fi
+
+# 2. Disable 4MB watermark boost
+echo 0 > /proc/sys/vm/watermark_boost_factor 2>/dev/null || true
+BOOST=$(cat /proc/sys/vm/watermark_boost_factor 2>/dev/null || echo "-1")
+if [ "$BOOST" != "0" ]; then
+    echo "실행 불가: vm.watermark_boost_factor($BOOST)가 0이 아닙니다 (4MB 워터마크 부스트 위험)." >&2
+    exit 1
+fi
+
+# 3. Ensure udevd, Xorg and xterm are running
+pidof udevd >/dev/null 2>&1 || /etc/init.d/S10udev start
+if ! pidof Xorg >/dev/null 2>&1; then
+    rm -f /var/run/xorg.pid
+    /etc/init.d/S40xorg start
+    sleep 4
+fi
+pidof xterm >/dev/null 2>&1 || DISPLAY=:0 xterm -geometry 53x17+0+0 </dev/null >/dev/null 2>&1 &
+
+# 4. Drop reclaimable page cache before memory check
+sync
+echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+# 5. Pre-flight memory headroom check
+MEM_FREE=$(awk '/^MemFree:/ {print $2}' /proc/meminfo)
+MEM_AVAIL=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+SWAP_FREE=$(awk '/^SwapFree:/ {print $2}' /proc/meminfo)
+TOTAL_FREE=$((MEM_AVAIL + SWAP_FREE))
+
+if [ -z "$MEM_AVAIL" ] || [ -z "$SWAP_FREE" ] || [ "$MEM_AVAIL" -lt 5500 ] || [ "$TOTAL_FREE" -lt 10000 ]; then
+    echo "실행 불가: 메모리 여유 공간이 부족합니다 (현재 MemFree=${MEM_FREE} kB, MemAvailable=${MEM_AVAIL} kB, SwapFree=${SWAP_FREE} kB, 합계=${TOTAL_FREE} kB / 필요: MemAvailable >= 5500 kB 및 합계 >= 10000 kB)" >&2
+    exit 1
+fi
+
+echo "ld: 메모리 여유 확인 통과 (MemFree=${MEM_FREE} kB, MemAvailable=${MEM_AVAIL} kB, SwapFree=${SWAP_FREE} kB)"
+cd /usr/share/loderunner-ng 2>/dev/null || cd /tmp
+DISPLAY=:0 nohup /usr/bin/loderunner-ng "$@" </dev/null >/tmp/lode.log 2>&1 &
+echo "ld: started (log /tmp/lode.log)"

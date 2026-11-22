@@ -1,0 +1,171 @@
+BEGIN
+{
+    @armed = nsecs;
+    printf("TRACE_READY: connect HP Prime once at port 3-10.2; no backup commands.\n");
+}
+
+kprobe:usb_storage:queuecommand_lck
+{
+    $command = (struct scsi_cmnd *)arg0;
+    $host_address = (uint64)$command->device->host;
+    $storage = (struct us_data *)($host_address + offsetof(struct Scsi_Host, hostdata));
+    $device = $storage->pusb_dev;
+    if ($device->descriptor.idVendor == 0x03f0 &&
+        $device->descriptor.idProduct == 0x0441 &&
+        str($device->dev.kobj.name) == "3-10.2") {
+        if (!@flags_seen[$device->devnum]) {
+            @flags_seen[$device->devnum] = 1;
+            printf("%llu DEVICE_FLAGS addr=%d flags=0x%lx\n",
+                   nsecs, $device->devnum, (uint64)$storage->fflags);
+        }
+        if ($command->cmnd[0] == 0xa1 || $command->cmnd[0] == 0x85) {
+            $gate = ($storage->fflags & 0x02000000) != 0;
+            if ($gate) { @ata_pending[(uint64)$command] = 1; }
+            printf("%llu ATA_QUEUE pid=%d comm=%s addr=%d opcode=0x%02x gate=%d\n",
+                   nsecs, pid, comm, $device->devnum, $command->cmnd[0], $gate);
+        }
+    }
+}
+
+kprobe:scsi_done
+/@ata_pending[(uint64)arg0]/
+{
+    $command = (struct scsi_cmnd *)arg0;
+    printf("%llu ATA_DONE result=0x%x\n", nsecs, $command->result);
+    delete(@ata_pending[(uint64)arg0]);
+}
+
+kprobe:usb_disconnect
+{
+    $device = *(struct usb_device **)arg0;
+    if ($device && $device->descriptor.idVendor == 0x03f0 &&
+        $device->descriptor.idProduct == 0x0441 &&
+        str($device->dev.kobj.name) == "3-10.2") {
+        printf("%llu DISCONNECT addr=%d\n", nsecs, $device->devnum);
+    }
+}
+
+kprobe:usb_submit_urb
+{
+    $urb = (struct urb *)arg0;
+    $device = $urb->dev;
+    if ($device->descriptor.idVendor == 0x03f0 &&
+        $device->descriptor.idProduct == 0x0441 &&
+        str($device->dev.kobj.name) == "3-10.2") {
+        if (@seen == 0) { @seen = nsecs; }
+        @events++;
+        @submit[tid] = (uint64)$urb;
+        printf("%llu SUBMIT pid=%d comm=%s urb=%lx addr=%d pipe=%x length=%d\n",
+               nsecs, pid, comm, (uint64)$urb, $device->devnum,
+               $urb->pipe, $urb->transfer_buffer_length);
+        if (($urb->pipe >> 30) == 2 && $urb->setup_packet != 0) {
+            $setup = (struct usb_ctrlrequest *)$urb->setup_packet;
+            printf("%llu SETUP urb=%lx type=%02x request=%02x value=%04x index=%04x length=%d\n",
+                   nsecs, (uint64)$urb, $setup->bRequestType, $setup->bRequest,
+                   $setup->wValue, $setup->wIndex, $setup->wLength);
+        }
+    }
+}
+
+kretprobe:usb_submit_urb
+/@submit[tid]/
+{
+    if ((int32)retval != 0) {
+        printf("%llu SUBMIT_ERROR pid=%d comm=%s urb=%lx status=%d\n%s\n",
+               nsecs, pid, comm, @submit[tid], (int32)retval, kstack(12));
+    }
+    delete(@submit[tid]);
+}
+
+kprobe:usb_hcd_giveback_urb
+{
+    $urb = (struct urb *)arg1;
+    $device = $urb->dev;
+    if ($device->descriptor.idVendor == 0x03f0 &&
+        $device->descriptor.idProduct == 0x0441 &&
+        str($device->dev.kobj.name) == "3-10.2") {
+        @events++;
+        printf("%llu COMPLETE urb=%lx addr=%d pipe=%x status=%d actual=%d requested=%d\n",
+               nsecs, (uint64)$urb, $device->devnum, $urb->pipe,
+               (int32)arg2, $urb->actual_length, $urb->transfer_buffer_length);
+    }
+}
+
+kprobe:usb_stor_Bulk_transport
+{
+    $storage = (struct us_data *)arg1;
+    $device = $storage->pusb_dev;
+    if ($device->descriptor.idVendor == 0x03f0 &&
+        $device->descriptor.idProduct == 0x0441 &&
+        str($device->dev.kobj.name) == "3-10.2") {
+        $command = (struct scsi_cmnd *)arg0;
+        @transport[tid] = 1;
+        @events++;
+        printf("%llu SCSI pid=%d comm=%s addr=%d cdb=%rx\n",
+               nsecs, pid, comm, $device->devnum,
+               buf($command->cmnd, $command->cmd_len > 16 ? 16 : $command->cmd_len));
+    }
+}
+
+kretprobe:usb_stor_Bulk_transport
+/@transport[tid]/
+{
+    printf("%llu TRANSPORT_RETURN pid=%d comm=%s result=%d\n",
+           nsecs, pid, comm, (int32)retval);
+    delete(@transport[tid]);
+}
+
+kprobe:usb_reset_device
+{
+    $device = (struct usb_device *)arg0;
+    if ($device->descriptor.idVendor == 0x03f0 &&
+        $device->descriptor.idProduct == 0x0441 &&
+        str($device->dev.kobj.name) == "3-10.2") {
+        @reset[tid] = 1;
+        @resets++;
+        printf("%llu RESET_ENTER pid=%d comm=%s addr=%d\n%s\n",
+               nsecs, pid, comm, $device->devnum, kstack(20));
+    }
+}
+
+kretprobe:usb_reset_device
+/@reset[tid]/
+{
+    printf("%llu RESET_RETURN pid=%d comm=%s result=%d\n",
+           nsecs, pid, comm, (int32)retval);
+    @reset_finished = nsecs;
+    delete(@reset[tid]);
+}
+
+interval:s:1
+{
+    if (@reset_finished && nsecs - @reset_finished >= 1000000000) {
+        printf("TRACE_STOP: reset captured; disconnect USB now, keep v16 screen.\n");
+        exit();
+    } else if (@seen && nsecs - @seen >= 20000000000) {
+        printf("TRACE_STOP: 20-second target window ended; disconnect USB now.\n");
+        exit();
+    } else if (nsecs - @armed >= 90000000000) {
+        printf("TRACE_STOP: arm timeout; do not connect USB.\n");
+        exit();
+    } else if (@events >= 4000) {
+        printf("TRACE_STOP: event limit; disconnect USB now.\n");
+        exit();
+    }
+}
+
+END
+{
+    printf("TRACE_SUMMARY events=%llu resets=%llu; no payload or serial captured.\n",
+           @events, @resets);
+    clear(@submit);
+    clear(@transport);
+    clear(@reset);
+    clear(@armed);
+    clear(@seen);
+    clear(@events);
+    clear(@resets);
+    clear(@reset_finished);
+    clear(@flags_seen);
+    clear(@ata_pending);
+}
